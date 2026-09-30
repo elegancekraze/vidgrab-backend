@@ -306,14 +306,20 @@ def tiktok(request: Request, url: str = Query(...)):
     music = (((det.get("music") or {}).get("play_url") or {}).get("url_list") or [None])[0]
     hw = v.get("has_watermark")
     fmts = []
+    seen = {}
     for br in (v.get("bit_rate") or []):
         pa = ((br.get("play_addr") or {}).get("url_list") or [None])[0]
         if not pa:
             continue
-        h = br.get("play_addr_height") or br.get("height")
-        label = f"{h}p" if h else (br.get("gear_name") or f"{br.get('bit_rate')}bps")
-        fmts.append({"quality": label, "format": "MP4", "type": "video",
-                     "size": br.get("data_size"), "sel": pa})
+        name = br.get("gear_name") or ""
+        m = re.search(r"(\d{3,4})", name)
+        label = f"{m.group(1)}p" if m else (name or f"{int((br.get('bit_rate') or 0)) // 1000}kbps")
+        size = br.get("data_size") or 0
+        if label not in seen or size > (seen[label][0] or 0):
+            seen[label] = (size, pa)
+    fmts = [{"quality": k, "format": "MP4", "type": "video", "size": seen[k][0] or None, "sel": seen[k][1]}
+            for k in seen]
+    fmts.sort(key=lambda f: -int(re.sub(r"\D", "", f["quality"]) or 0))
     if not fmts and play:
         fmts.append({"quality": "Best", "format": "MP4", "type": "video", "size": None, "sel": play})
     if dl:
