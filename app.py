@@ -195,6 +195,42 @@ def youtube(request: Request, url: str = Query(...)):
             "thumbnail": o.get("thumbnail"), "formats": fmts}
 
 
+TIKWM = "https://www.tikwm.com/api/"
+
+
+def is_tiktok(url: str) -> bool:
+    return "tiktok.com" in (url or "").lower()
+
+
+@app.get("/api/tiktok")
+def tiktok(request: Request, url: str = Query(...)):
+    check_auth(request)
+    try:
+        q = urllib.parse.urlencode({"url": url, "hd": "1"})
+        req = urllib.request.Request(TIKWM + "?" + q, headers={"User-Agent": UA, "accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=45) as r:
+            j = json.load(r)
+    except Exception as e:
+        return JSONResponse(status_code=502, content={"ok": False, "error": str(e)})
+    if j.get("code") != 0:
+        return JSONResponse(status_code=502, content={"ok": False, "error": j.get("msg") or "tikwm failed"})
+    d = j.get("data") or {}
+    fmts = []
+    nowm = [(d.get("hd_size") or 0, d.get("hdplay")), (d.get("size") or 0, d.get("play"))]
+    nowm = [(s, u) for s, u in nowm if u]
+    nowm.sort(key=lambda x: x[0], reverse=True)
+    for i, (size, u) in enumerate(nowm):
+        fmts.append({"quality": ("Best · no watermark" if i == 0 else "No watermark"),
+                     "format": "MP4", "type": "video", "size": size or None, "url": u})
+    if d.get("wmplay"):
+        fmts.append({"quality": "With watermark", "format": "MP4", "type": "video",
+                     "size": d.get("size") or None, "url": d.get("wmplay")})
+    if d.get("music"):
+        fmts.append({"quality": "Audio", "format": "MP3", "type": "audio", "size": None, "url": d.get("music")})
+    return {"ok": True, "title": d.get("title"), "duration": d.get("duration"),
+            "thumbnail": d.get("cover"), "formats": fmts}
+
+
 @app.get("/api/info")
 def info(request: Request, url: str = Query(...)):
     check_auth(request)
