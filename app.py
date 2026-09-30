@@ -166,17 +166,19 @@ def youtube(request: Request, url: str = Query(...)):
     check_auth(request)
     o = None
     err = None
-    for origin in ("cache", "source"):
+    best = -1
+    for origin in ("source", "cache", "source"):
         try:
             cand = vidssave_parse(url, origin)
-            if any(x.get("download_url") for x in cand.get("resources", [])):
-                o = cand
-                break
-            o = o or cand
         except Exception as e:
             err = e
-    if o is None:
-        return JSONResponse(status_code=502, content={"ok": False, "error": str(err)})
+            continue
+        n = sum(1 for x in cand.get("resources", []) if x.get("download_url"))
+        if n > best:
+            best = n
+            o = cand
+    if o is None or best <= 0:
+        return JSONResponse(status_code=502, content={"ok": False, "error": str(err) or "no formats"})
     fmts = []
     for x in o.get("resources", []):
         if not x.get("download_url"):
