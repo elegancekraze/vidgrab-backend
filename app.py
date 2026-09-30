@@ -393,12 +393,13 @@ def clean(request: Request, url: str = Query(...), name: str = Query("video.mp4"
             w, h = (int(x) for x in probe.split(",")[:2])
             bh = max(8, int(h * band))
             top = h - bh
-            vf = (f"split=2[a][b];[b]crop={w}:{bh}:0:{top},boxblur=20:2[bb];"
+            vf = (f"split=2[a][b];[b]crop={w}:{bh}:0:{top},boxblur=10:1[bb];"
                   f"[a][bb]overlay=0:{top}")
         else:
             keep = max(0.5, 1.0 - band)
             vf = f"crop=iw:ih*{keep:.4f}:0:0"
-        p = subprocess.run(["ffmpeg", "-y", "-i", src, "-vf", vf, "-c:a", "copy", "-movflags", "+faststart", dst],
+        p = subprocess.run(["ffmpeg", "-y", "-i", src, "-vf", vf, "-preset", "ultrafast",
+                            "-crf", "23", "-c:a", "copy", "-movflags", "+faststart", dst],
                            capture_output=True, timeout=240)
         if p.returncode != 0 or not os.path.exists(dst):
             raise RuntimeError(p.stderr.decode("utf-8", "replace")[-200:])
