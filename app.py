@@ -240,30 +240,66 @@ def is_tiktok(url: str) -> bool:
 @app.get("/api/tiktok")
 def tiktok(request: Request, url: str = Query(...)):
     check_auth(request)
+    title = None
+    duration = None
+    thumb = None
+    vids: dict = {}
+    auds: dict = {}
+    try:
+        opts = base_opts(request, url)
+        opts["skip_download"] = True
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+        title = info.get("title")
+        duration = info.get("duration")
+        thumb = info.get("thumbnail")
+        for f in info.get("formats") or []:
+            fid = (f.get("format_id") or "").lower()
+            u = f.get("url")
+            if not u:
+                continue
+            if "download" in fid:  # watermarked variant
+                continue
+            size = f.get("filesize") or f.get("filesize_approx") or 0
+            if f.get("vcodec") not in (None, "none"):
+                h = f.get("height")
+                if h and (h not in vids or size > (vids[h][0] or 0)):
+                    vids[h] = (size, u, f.get("ext") or "mp4")
+            elif f.get("acodec") not in (None, "none"):
+                abr = f.get("abr") or 0
+                k = int(abr) if abr else 0
+                if k not in auds or size > (auds[k][0] or 0):
+                    auds[k] = (size, u, f.get("ext") or "m4a")
+    except Exception:
+        pass
+    fmts = []
+    for h in sorted(vids, reverse=True):
+        size, u, ext = vids[h]
+        fmts.append({"quality": f"{h}p", "format": ext.upper(), "type": "video", "size": size or None, "url": u})
+    for k in sorted(auds, reverse=True):
+        size, u, ext = auds[k]
+        fmts.append({"quality": (f"{k}kbps" if k else "audio"), "format": ext.upper(), "type": "audio", "size": size or None, "url": u})
+    # watermarked option + fallback via tikwm
     try:
         q = urllib.parse.urlencode({"url": url, "hd": "1"})
         req = urllib.request.Request(TIKWM + "?" + q, headers={"User-Agent": UA, "accept": "application/json"})
         with urllib.request.urlopen(req, timeout=45) as r:
             j = json.load(r)
-    except Exception as e:
-        return JSONResponse(status_code=502, content={"ok": False, "error": str(e)})
-    if j.get("code") != 0:
-        return JSONResponse(status_code=502, content={"ok": False, "error": j.get("msg") or "tikwm failed"})
-    d = j.get("data") or {}
-    fmts = []
-    nowm = [(d.get("hd_size") or 0, d.get("hdplay")), (d.get("size") or 0, d.get("play"))]
-    nowm = [(s, u) for s, u in nowm if u]
-    nowm.sort(key=lambda x: x[0], reverse=True)
-    for i, (size, u) in enumerate(nowm):
-        fmts.append({"quality": ("Best · no watermark" if i == 0 else "No watermark"),
-                     "format": "MP4", "type": "video", "size": size or None, "url": u})
-    if d.get("wmplay"):
-        fmts.append({"quality": "With watermark", "format": "MP4", "type": "video",
-                     "size": d.get("size") or None, "url": d.get("wmplay")})
-    if d.get("music"):
-        fmts.append({"quality": "Audio", "format": "MP3", "type": "audio", "size": None, "url": d.get("music")})
-    return {"ok": True, "title": d.get("title"), "duration": d.get("duration"),
-            "thumbnail": d.get("cover"), "formats": fmts}
+        d = j.get("data") or {}
+        title = title or d.get("title")
+        duration = duration or d.get("duration")
+        thumb = thumb or d.get("cover")
+        if d.get("wmplay"):
+            fmts.append({"quality": "With watermark", "format": "MP4", "type": "video",
+                         "size": d.get("size") or None, "url": d.get("wmplay")})
+        if not vids and d.get("hdplay"):
+            fmts.insert(0, {"quality": "HD · no watermark", "format": "MP4", "type": "video",
+                            "size": d.get("hd_size") or None, "url": d.get("hdplay")})
+    except Exception:
+        pass
+    if not fmts:
+        return JSONResponse(status_code=502, content={"ok": False, "error": "no formats"})
+    return {"ok": True, "title": title, "duration": duration, "thumbnail": thumb, "formats": fmts}
 
 
 @app.get("/api/info")
