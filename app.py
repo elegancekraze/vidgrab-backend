@@ -12,7 +12,7 @@ import urllib.parse
 import yt_dlp
 from Crypto.Cipher import AES
 from fastapi import FastAPI, Request, HTTPException, Query
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask
 
 API_TOKEN = os.environ.get("API_TOKEN", "").strip()
@@ -300,6 +300,38 @@ def tiktok(request: Request, url: str = Query(...)):
     if not fmts:
         return JSONResponse(status_code=502, content={"ok": False, "error": "no formats"})
     return {"ok": True, "title": title, "duration": duration, "thumbnail": thumb, "formats": fmts}
+
+
+@app.get("/api/stream")
+def stream(request: Request, url: str = Query(...), name: str = Query("video.mp4")):
+    """Token-gated proxy: fetch a (IP/geo-gated) media URL from this server and stream it out."""
+    check_auth(request)
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return JSONResponse(status_code=400, content={"ok": False, "error": "bad url"})
+    hdrs = {"User-Agent": UA, "accept": "*/*", "referer": "https://www.tiktok.com/"}
+    rng = request.headers.get("range")
+    if rng:
+        hdrs["range"] = rng
+    try:
+        up = urllib.request.urlopen(urllib.request.Request(url, headers=hdrs), timeout=60)
+    except Exception as e:
+        return JSONResponse(status_code=502, content={"ok": False, "error": str(e)})
+
+    def gen():
+        try:
+            while True:
+                chunk = up.read(65536)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            up.close()
+
+    out = {"content-type": up.headers.get("Content-Type", "video/mp4"),
+           "content-disposition": f'attachment; filename="{name}"'}
+    if up.headers.get("Content-Length"):
+        out["content-length"] = up.headers["Content-Length"]
+    return StreamingResponse(gen(), headers=out)
 
 
 @app.get("/api/info")
