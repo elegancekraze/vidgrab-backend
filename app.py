@@ -12,6 +12,7 @@ from starlette.background import BackgroundTask
 API_TOKEN = os.environ.get("API_TOKEN", "").strip()
 DEFAULT_COOKIES_B64 = os.environ.get("COOKIES_B64", "").strip()
 UPSTREAM_PROXY = os.environ.get("UPSTREAM_PROXY", "").strip()
+YOUTUBE_PROXY = os.environ.get("YOUTUBE_PROXY", "").strip()
 IMPERSONATE = os.environ.get("IMPERSONATE", "").strip()
 
 app = FastAPI(title="ytdlp-backend", version="1.0.0")
@@ -36,7 +37,14 @@ def cookie_file(request: Request) -> str | None:
     return f.name
 
 
-def base_opts(request: Request) -> dict:
+def proxy_for(url: str) -> str:
+    u = (url or "").lower()
+    if ("youtube.com" in u or "youtu.be" in u or "youtube-nocookie.com" in u) and YOUTUBE_PROXY:
+        return YOUTUBE_PROXY
+    return UPSTREAM_PROXY
+
+
+def base_opts(request: Request, url: str = "") -> dict:
     cp = cookie_file(request)
     opts = {
         "quiet": True,
@@ -47,8 +55,9 @@ def base_opts(request: Request) -> dict:
     }
     if cp:
         opts["cookiefile"] = cp
-    if UPSTREAM_PROXY:
-        opts["proxy"] = UPSTREAM_PROXY
+    px = proxy_for(url)
+    if px:
+        opts["proxy"] = px
     if IMPERSONATE:
         opts["impersonate"] = IMPERSONATE
     return opts
@@ -62,7 +71,7 @@ def root():
 @app.get("/api/info")
 def info(request: Request, url: str = Query(...)):
     check_auth(request)
-    opts = base_opts(request)
+    opts = base_opts(request, url)
     opts["skip_download"] = True
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
@@ -109,7 +118,7 @@ def download(
 ):
     check_auth(request)
     tmp = tempfile.mkdtemp(prefix="ydlp_")
-    opts = base_opts(request)
+    opts = base_opts(request, url)
     opts.update(
         {
             "format": fmt,
