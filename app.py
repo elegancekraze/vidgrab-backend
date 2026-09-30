@@ -274,12 +274,10 @@ def tiktok(request: Request, url: str = Query(...)):
         pass
     fmts = []
     for h in sorted(vids, reverse=True):
-        size, u, ext = vids[h]
-        fmts.append({"quality": f"{h}p", "format": ext.upper(), "type": "video", "size": size or None, "url": u})
-    for k in sorted(auds, reverse=True):
-        size, u, ext = auds[k]
-        fmts.append({"quality": (f"{k}kbps" if k else "audio"), "format": ext.upper(), "type": "audio", "size": size or None, "url": u})
-    # watermarked option + fallback via tikwm
+        fmts.append({"quality": f"{h}p", "format": "MP4", "type": "video", "size": None, "sel": str(h)})
+    if auds:
+        fmts.append({"quality": "Audio", "format": "M4A", "type": "audio", "size": None, "sel": "audio"})
+    # watermarked option (direct) + fallback via tikwm
     try:
         q = urllib.parse.urlencode({"url": url, "hd": "1"})
         req = urllib.request.Request(TIKWM + "?" + q, headers={"User-Agent": UA, "accept": "application/json"})
@@ -293,7 +291,7 @@ def tiktok(request: Request, url: str = Query(...)):
             fmts.append({"quality": "With watermark", "format": "MP4", "type": "video",
                          "size": d.get("size") or None, "url": d.get("wmplay")})
         if not vids and d.get("hdplay"):
-            fmts.insert(0, {"quality": "HD · no watermark", "format": "MP4", "type": "video",
+            fmts.insert(0, {"quality": "HD", "format": "MP4", "type": "video",
                             "size": d.get("hd_size") or None, "url": d.get("hdplay")})
     except Exception:
         pass
