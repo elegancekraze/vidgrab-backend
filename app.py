@@ -11,6 +11,8 @@ from starlette.background import BackgroundTask
 
 API_TOKEN = os.environ.get("API_TOKEN", "").strip()
 DEFAULT_COOKIES_B64 = os.environ.get("COOKIES_B64", "").strip()
+UPSTREAM_PROXY = os.environ.get("UPSTREAM_PROXY", "").strip()
+IMPERSONATE = os.environ.get("IMPERSONATE", "").strip()
 
 app = FastAPI(title="ytdlp-backend", version="1.0.0")
 
@@ -45,6 +47,10 @@ def base_opts(request: Request) -> dict:
     }
     if cp:
         opts["cookiefile"] = cp
+    if UPSTREAM_PROXY:
+        opts["proxy"] = UPSTREAM_PROXY
+    if IMPERSONATE:
+        opts["impersonate"] = IMPERSONATE
     return opts
 
 
