@@ -322,13 +322,19 @@ def tiktok(request: Request, url: str = Query(...)):
     fmts.sort(key=lambda f: -int(re.sub(r"\D", "", f["quality"]) or 0))
     if not fmts and play:
         fmts.append({"quality": "Best", "format": "MP4", "type": "video", "size": None, "sel": play})
+    nowm = ((v.get("download_no_watermark_addr") or {}).get("url_list") or [None])[0]
+    if nowm and nowm != play:
+        fmts.insert(0, {"quality": "Origin · no watermark", "format": "MP4", "type": "video",
+                        "size": None, "sel": nowm})
     if dl:
         fmts.append({"quality": "With watermark", "format": "MP4", "type": "video", "size": None, "sel": dl})
     if music:
         fmts.append({"quality": "Audio", "format": "MP3", "type": "audio", "size": None, "sel": music})
     if hw and play:
-        fmts.append({"quality": "Clean · crop out watermark", "format": "MP4", "type": "video",
+        fmts.append({"quality": "Clean · crop watermark", "format": "MP4", "type": "video",
                      "size": None, "sel": "crop:" + play})
+        fmts.append({"quality": "Clean · blur watermark", "format": "MP4", "type": "video",
+                     "size": None, "sel": "blur:" + play})
     return {"ok": True, "title": det.get("desc"), "duration": det.get("duration") or v.get("duration"),
             "thumbnail": (((v.get("origin_cover") or {}).get("url_list") or [None])[0]),
             "has_watermark": hw, "formats": fmts}
@@ -366,20 +372,30 @@ def stream(request: Request, url: str = Query(...), name: str = Query("video.mp4
     return StreamingResponse(gen(), headers=out)
 
 
-@app.get("/api/crop")
-def crop(request: Request, url: str = Query(...), name: str = Query("video.mp4"), bottom: float = 0.12):
-    """Download the clean play_addr, crop off the bottom band (removes baked-in TikTok watermark), return the file."""
+@app.get("/api/clean")
+def clean(request: Request, url: str = Query(...), name: str = Query("video.mp4"),
+          mode: str = Query("crop"), bottom: float = 0.12):
+    """Remove a baked-in bottom watermark: mode=crop (trim band) or mode=blur (delogo the band, keeps frame)."""
     check_auth(request)
     if not (url.startswith("http://") or url.startswith("https://")):
         return JSONResponse(status_code=400, content={"ok": False, "error": "bad url"})
-    tmp = tempfile.mkdtemp(prefix="ttcrop_")
+    tmp = tempfile.mkdtemp(prefix="ttclean_")
     src = os.path.join(tmp, "in.mp4")
     dst = os.path.join(tmp, "out.mp4")
     try:
         with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": UA, "referer": "https://www.tiktok.com/"}), timeout=120) as r, open(src, "wb") as f:
             shutil.copyfileobj(r, f)
-        keep = max(0.5, 1.0 - max(0.0, min(bottom, 0.4)))
-        vf = f"crop=iw:ih*{keep:.4f}:0:0"
+        band = max(0.0, min(bottom, 0.4))
+        if mode == "blur":
+            probe = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
+                                    "-show_entries", "stream=width,height", "-of", "csv=p=0", src],
+                                   capture_output=True, timeout=60).stdout.decode().strip()
+            w, h = (int(x) for x in probe.split(",")[:2])
+            bh = max(2, int(h * band))
+            vf = f"delogo=x=0:y={h - bh}:w={w}:h={bh}:show=0"
+        else:
+            keep = max(0.5, 1.0 - band)
+            vf = f"crop=iw:ih*{keep:.4f}:0:0"
         p = subprocess.run(["ffmpeg", "-y", "-i", src, "-vf", vf, "-c:a", "copy", "-movflags", "+faststart", dst],
                            capture_output=True, timeout=240)
         if p.returncode != 0 or not os.path.exists(dst):
