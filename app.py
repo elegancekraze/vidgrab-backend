@@ -1,8 +1,11 @@
 import os
 import glob
+import json
 import base64
 import shutil
 import tempfile
+import urllib.request
+import urllib.error
 
 import yt_dlp
 from fastapi import FastAPI, Request, HTTPException, Query
@@ -66,6 +69,45 @@ def base_opts(request: Request, url: str = "") -> dict:
 @app.get("/")
 def root():
     return {"ok": True, "service": "ytdlp-backend", "auth": bool(API_TOKEN)}
+
+
+UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
+
+@app.get("/api/fetch")
+def fetch(
+    request: Request,
+    url: str = Query(...),
+    method: str = Query("GET"),
+    data: str = Query(""),
+    headers: str = Query(""),
+):
+    """Token-gated remote fetch, executed from this server's egress (for recon)."""
+    check_auth(request)
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return JSONResponse(status_code=400, content={"ok": False, "error": "bad url"})
+    hdrs = {}
+    if headers:
+        try:
+            hdrs = json.loads(headers)
+        except Exception:
+            return JSONResponse(status_code=400, content={"ok": False, "error": "bad headers json"})
+    body = data.encode() if data else None
+    req = urllib.request.Request(url, data=body, method=method.upper())
+    req.add_header("User-Agent", UA)
+    req.add_header("Accept", "*/*")
+    for k, v in hdrs.items():
+        req.add_header(k, v)
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            raw = r.read(300000).decode("utf-8", "replace")
+            return {"ok": True, "status": r.status, "final_url": r.geturl(),
+                    "headers": {k: v for k, v in r.headers.items()}, "body": raw}
+    except urllib.error.HTTPError as e:
+        raw = e.read(300000).decode("utf-8", "replace")
+        return {"ok": False, "status": e.code, "headers": dict(e.headers), "body": raw}
+    except Exception as e:
+        return JSONResponse(status_code=502, content={"ok": False, "error": str(e)})
 
 
 @app.get("/api/info")
