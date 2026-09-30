@@ -1,6 +1,7 @@
 import os
 import glob
 import json
+import time
 import base64
 import shutil
 import tempfile
@@ -133,16 +134,15 @@ def _vidssave_decrypt(blob: str):
     return None
 
 
-def vidssave_parse(url: str, origin: str = "cache") -> dict:
-    body = urllib.parse.urlencode({
-        "hostname": "vidssave.com",
-        "auth": "4c9b7d21",
-        "domain": "api-ak.vidssave.com",
-        "origin": origin,
-        "link": url,
-    }).encode()
+_RID_CACHE: dict = {}
+
+
+def _vs_post_text(path: str, fields: dict) -> str:
+    fields = {"hostname": "vidssave.com", "auth": "4c9b7d21", "domain": "api-ak.vidssave.com", **fields}
+    body = urllib.parse.urlencode(fields).encode()
     req = urllib.request.Request(
-        VIDSAVE_URL, data=body, method="POST",
+        "https://api.vidssave.com/api/contentsite_api/" + path,
+        data=body, method="POST",
         headers={
             "User-Agent": UA,
             "accept": "*/*",
@@ -152,7 +152,11 @@ def vidssave_parse(url: str, origin: str = "cache") -> dict:
         },
     )
     with urllib.request.urlopen(req, timeout=60) as r:
-        j = json.load(r)
+        return r.read().decode("utf-8", "replace")
+
+
+def vidssave_parse(url: str, origin: str = "source") -> dict:
+    j = json.loads(_vs_post_text("media/parse", {"origin": origin, "link": url}))
     if not j.get("data"):
         raise RuntimeError(j.get("msg") or "no data from provider")
     obj = _vidssave_decrypt(j["data"])
@@ -161,38 +165,69 @@ def vidssave_parse(url: str, origin: str = "cache") -> dict:
     return json.loads(obj)
 
 
+def vidssave_link(content: str) -> str:
+    j = json.loads(_vs_post_text("media/download", {"request": content, "no_encrypt": 1}))
+    if not j.get("data"):
+        raise RuntimeError(j.get("msg") or "download init failed")
+    tid = json.loads(_vidssave_decrypt(j["data"]))["task_id"]
+    for _ in range(8):
+        raw = _vs_post_text("media/download_query", {"task_id": tid, "download_domain": "vidssave.com", "origin": "content_site"})
+        data = None
+        for line in raw.splitlines():
+            line = line.strip()
+            if line.startswith("data:"):
+                try:
+                    data = json.loads(line[5:].strip())
+                except Exception:
+                    data = None
+        if data and data.get("download_link"):
+            return data["download_link"]
+        time.sleep(1.2)
+    raise RuntimeError("no download link")
+
+
 @app.get("/api/youtube")
 def youtube(request: Request, url: str = Query(...)):
     check_auth(request)
-    o = None
-    err = None
-    best = -1
-    for origin in ("source", "cache", "source"):
-        try:
-            cand = vidssave_parse(url, origin)
-        except Exception as e:
-            err = e
-            continue
-        n = sum(1 for x in cand.get("resources", []) if x.get("download_url"))
-        if n > best:
-            best = n
-            o = cand
-    if o is None or best <= 0:
-        return JSONResponse(status_code=502, content={"ok": False, "error": str(err) or "no formats"})
+    try:
+        o = vidssave_parse(url, "source")
+    except Exception as e:
+        return JSONResponse(status_code=502, content={"ok": False, "error": str(e)})
     fmts = []
     for x in o.get("resources", []):
-        if not x.get("download_url"):
+        rid = x.get("resource_id")
+        if not rid:
             continue
-        fmts.append({
-            "quality": x.get("quality"),
-            "format": x.get("format"),
-            "type": x.get("type"),
-            "size": x.get("size"),
-            "url": x.get("download_url"),
-        })
+        _RID_CACHE[rid] = x.get("resource_content") or ""
+        f = {"quality": x.get("quality"), "format": x.get("format"), "type": x.get("type"),
+             "size": x.get("size"), "rid": rid}
+        if x.get("download_url"):
+            f["url"] = x["download_url"]
+        fmts.append(f)
     fmts.sort(key=lambda f: (0 if f.get("type") == "video" else 1, -(f.get("size") or 0)))
     return {"ok": True, "title": o.get("title"), "duration": o.get("duration"),
             "thumbnail": o.get("thumbnail"), "formats": fmts}
+
+
+@app.get("/api/youtube/url")
+def youtube_url(request: Request, url: str = Query(...), rid: str = Query(...)):
+    check_auth(request)
+    content = _RID_CACHE.get(rid)
+    if not content:
+        try:
+            o = vidssave_parse(url, "source")
+        except Exception as e:
+            return JSONResponse(status_code=502, content={"ok": False, "error": str(e)})
+        for x in o.get("resources", []):
+            if x.get("resource_id"):
+                _RID_CACHE[x["resource_id"]] = x.get("resource_content") or ""
+        content = _RID_CACHE.get(rid)
+    if not content:
+        return JSONResponse(status_code=404, content={"ok": False, "error": "format not found"})
+    try:
+        return {"ok": True, "url": vidssave_link(content)}
+    except Exception as e:
+        return JSONResponse(status_code=502, content={"ok": False, "error": str(e)})
 
 
 TIKWM = "https://www.tikwm.com/api/"
