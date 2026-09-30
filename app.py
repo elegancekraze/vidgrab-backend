@@ -392,9 +392,8 @@ def clean(request: Request, url: str = Query(...), name: str = Query("video.mp4"
                                    capture_output=True, timeout=60).stdout.decode().strip()
             w, h = (int(x) for x in probe.split(",")[:2])
             bh = max(8, int(h * band))
-            top = h - bh
-            vf = (f"split=2[a][b];[b]crop={w}:{bh}:0:{top},boxblur=10:1[bb];"
-                  f"[a][bb]overlay=0:{top}")
+            y = h - bh - 1
+            vf = f"delogo=x=1:y={y}:w={w - 2}:h={bh}"
         else:
             keep = max(0.5, 1.0 - band)
             vf = f"crop=iw:ih*{keep:.4f}:0:0"
