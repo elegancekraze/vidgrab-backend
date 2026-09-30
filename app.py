@@ -6,8 +6,10 @@ import shutil
 import tempfile
 import urllib.request
 import urllib.error
+import urllib.parse
 
 import yt_dlp
+from Crypto.Cipher import AES
 from fastapi import FastAPI, Request, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.background import BackgroundTask
@@ -108,6 +110,78 @@ def fetch(
         return {"ok": False, "status": e.code, "headers": dict(e.headers), "body": raw}
     except Exception as e:
         return JSONResponse(status_code=502, content={"ok": False, "error": str(e)})
+
+
+VIDSAVE_URL = "https://api.vidssave.com/api/contentsite_api/media/parse"
+VIDSAVE_KEYS = ["4c9b7d2e" * 3 + "4c9b7d21", "rz18efAXUbdiaO7k"]
+YOUTUBE_HOSTS = ("youtube.com", "youtu.be", "youtube-nocookie.com")
+
+
+def is_youtube(url: str) -> bool:
+    u = (url or "").lower()
+    return any(h in u for h in YOUTUBE_HOSTS)
+
+
+def _vidssave_decrypt(blob: str):
+    for k in VIDSAVE_KEYS:
+        kb = k.encode()
+        try:
+            pt = AES.new(kb, AES.MODE_CBC, kb[:16]).decrypt(base64.b64decode(blob)).rstrip(b"\x00")
+            return pt.decode("utf-8")
+        except Exception:
+            continue
+    return None
+
+
+def vidssave_parse(url: str) -> dict:
+    body = urllib.parse.urlencode({
+        "hostname": "vidssave.com",
+        "auth": "4c9b7d21",
+        "domain": "api-ak.vidssave.com",
+        "origin": "source",
+        "link": url,
+    }).encode()
+    req = urllib.request.Request(
+        VIDSAVE_URL, data=body, method="POST",
+        headers={
+            "User-Agent": UA,
+            "accept": "*/*",
+            "content-type": "application/x-www-form-urlencoded",
+            "origin": "https://vidssave.com",
+            "referer": "https://vidssave.com/",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=60) as r:
+        j = json.load(r)
+    if not j.get("data"):
+        raise RuntimeError(j.get("msg") or "no data from provider")
+    obj = _vidssave_decrypt(j["data"])
+    if not obj:
+        raise RuntimeError("decrypt failed")
+    return json.loads(obj)
+
+
+@app.get("/api/youtube")
+def youtube(request: Request, url: str = Query(...)):
+    check_auth(request)
+    try:
+        o = vidssave_parse(url)
+    except Exception as e:
+        return JSONResponse(status_code=502, content={"ok": False, "error": str(e)})
+    fmts = []
+    for x in o.get("resources", []):
+        if not x.get("download_url"):
+            continue
+        fmts.append({
+            "quality": x.get("quality"),
+            "format": x.get("format"),
+            "type": x.get("type"),
+            "size": x.get("size"),
+            "url": x.get("download_url"),
+        })
+    fmts.sort(key=lambda f: (0 if f.get("type") == "video" else 1, -(f.get("size") or 0)))
+    return {"ok": True, "title": o.get("title"), "duration": o.get("duration"),
+            "thumbnail": o.get("thumbnail"), "formats": fmts}
 
 
 @app.get("/api/info")
