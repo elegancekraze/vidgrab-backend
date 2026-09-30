@@ -2,6 +2,8 @@ import os
 import glob
 import json
 import time
+import re
+import subprocess
 import base64
 import shutil
 import tempfile
@@ -230,74 +232,100 @@ def youtube_url(request: Request, url: str = Query(...), rid: str = Query(...)):
         return JSONResponse(status_code=502, content={"ok": False, "error": str(e)})
 
 
-TIKWM = "https://www.tikwm.com/api/"
+TT_UA = ("com.zhiliaoapp.musically/2023501030 (Linux; U; Android 13; en_US; "
+         "Pixel 7; Build/TD.A220804.031; Cronet/58.0.2991.0)")
+TT_HOSTS = ["api16-normal-c-useast1a.tiktokv.com", "api22-normal-c-useast2a.tiktokv.com",
+            "api19-normal-c-useast1a.tiktokv.com"]
 
 
 def is_tiktok(url: str) -> bool:
     return "tiktok.com" in (url or "").lower()
 
 
+def tiktok_id(url: str):
+    m = re.search(r"/video/(\d+)", url or "")
+    return m.group(1) if m else None
+
+
+def _tt_query() -> dict:
+    import uuid
+    import random
+    t = int(time.time())
+    return {
+        "device_platform": "android", "os": "android", "ssmix": "a",
+        "_rticket": int(time.time() * 1000), "cdid": str(uuid.uuid4()),
+        "channel": "googleplay", "aid": "1988", "app_name": "musical_ly",
+        "version_code": "350103", "version_name": "35.1.3",
+        "manifest_version_code": "2023501030", "update_version_code": "2023501030",
+        "ab_version": "35.1.3", "resolution": "1080*2400", "dpi": "420",
+        "device_type": "Pixel 7", "device_brand": "Google", "language": "en",
+        "os_api": "29", "os_version": "13", "ac": "wifi", "is_pad": "0",
+        "current_region": "US", "app_type": "normal", "sys_region": "US",
+        "last_install_time": t - 86400, "timezone_name": "America/New_York",
+        "residence": "US", "app_language": "en", "timezone_offset": "-14400",
+        "host_abi": "armeabi-v7a", "locale": "en", "ac2": "wifi5g", "uoo": "1",
+        "carrier_region": "US", "op_region": "US", "region": "US", "ts": t,
+        "device_id": str(random.randint(7250000000000000000, 7325099899999994577)),
+        "openudid": "".join(random.choices("0123456789abcdef", k=16)),
+    }
+
+
+def tiktok_app(url: str):
+    """TikTok app API: returns the aweme detail (video.play_addr = clean, download_addr = watermarked)."""
+    import random
+    aid = tiktok_id(url)
+    if not aid:
+        return None
+    body = f"aweme_ids=[{aid}]&request_source=0".encode()
+    for host in TT_HOSTS:
+        u = f"https://{host}/aweme/v1/multi/aweme/detail/?" + urllib.parse.urlencode(_tt_query())
+        req = urllib.request.Request(u, data=body, method="POST", headers={
+            "User-Agent": TT_UA, "Accept": "application/json", "X-Argus": "",
+            "Cookie": "odin_tt=" + "".join(random.choices("0123456789abcdef", k=160)),
+        })
+        try:
+            with urllib.request.urlopen(req, timeout=40) as r:
+                j = json.load(r)
+        except Exception:
+            continue
+        det = (j.get("aweme_details") or [None])[0]
+        if det:
+            return det
+    return None
+
+
 @app.get("/api/tiktok")
 def tiktok(request: Request, url: str = Query(...)):
     check_auth(request)
-    title = None
-    duration = None
-    thumb = None
-    vids: dict = {}
-    auds: dict = {}
-    try:
-        opts = base_opts(request, url)
-        opts["skip_download"] = True
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-        title = info.get("title")
-        duration = info.get("duration")
-        thumb = info.get("thumbnail")
-        for f in info.get("formats") or []:
-            fid = (f.get("format_id") or "").lower()
-            u = f.get("url")
-            if not u:
-                continue
-            if "download" in fid:  # watermarked variant
-                continue
-            size = f.get("filesize") or f.get("filesize_approx") or 0
-            if f.get("vcodec") not in (None, "none"):
-                h = f.get("height")
-                if h and (h not in vids or size > (vids[h][0] or 0)):
-                    vids[h] = (size, u, f.get("ext") or "mp4")
-            elif f.get("acodec") not in (None, "none"):
-                abr = f.get("abr") or 0
-                k = int(abr) if abr else 0
-                if k not in auds or size > (auds[k][0] or 0):
-                    auds[k] = (size, u, f.get("ext") or "m4a")
-    except Exception:
-        pass
+    det = tiktok_app(url)
+    if not det:
+        return JSONResponse(status_code=502, content={"ok": False, "error": "tiktok resolve failed"})
+    v = det.get("video") or {}
+    play = ((v.get("play_addr") or {}).get("url_list") or [None])[0]
+    dl = ((v.get("download_addr") or {}).get("url_list") or [None])[0]
+    music = (((det.get("music") or {}).get("play_url") or {}).get("url_list") or [None])[0]
+    hw = v.get("has_watermark")
     fmts = []
-    for h in sorted(vids, reverse=True):
-        fmts.append({"quality": f"{h}p", "format": "MP4", "type": "video", "size": None, "sel": str(h)})
-    if auds:
-        fmts.append({"quality": "Audio", "format": "M4A", "type": "audio", "size": None, "sel": "audio"})
-    # watermarked option (direct) + fallback via tikwm
-    try:
-        q = urllib.parse.urlencode({"url": url, "hd": "1"})
-        req = urllib.request.Request(TIKWM + "?" + q, headers={"User-Agent": UA, "accept": "application/json"})
-        with urllib.request.urlopen(req, timeout=45) as r:
-            j = json.load(r)
-        d = j.get("data") or {}
-        title = title or d.get("title")
-        duration = duration or d.get("duration")
-        thumb = thumb or d.get("cover")
-        if d.get("wmplay"):
-            fmts.append({"quality": "With watermark", "format": "MP4", "type": "video",
-                         "size": d.get("size") or None, "url": d.get("wmplay")})
-        if not vids and d.get("hdplay"):
-            fmts.insert(0, {"quality": "HD", "format": "MP4", "type": "video",
-                            "size": d.get("hd_size") or None, "url": d.get("hdplay")})
-    except Exception:
-        pass
-    if not fmts:
-        return JSONResponse(status_code=502, content={"ok": False, "error": "no formats"})
-    return {"ok": True, "title": title, "duration": duration, "thumbnail": thumb, "formats": fmts}
+    for br in (v.get("bit_rate") or []):
+        pa = ((br.get("play_addr") or {}).get("url_list") or [None])[0]
+        if not pa:
+            continue
+        h = br.get("play_addr_height") or br.get("height")
+        label = f"{h}p" if h else (br.get("gear_name") or f"{br.get('bit_rate')}bps")
+        fmts.append({"quality": label, "format": "MP4", "type": "video",
+                     "size": br.get("data_size"), "sel": pa})
+    if not fmts and play:
+        fmts.append({"quality": "Best", "format": "MP4", "type": "video", "size": None, "sel": play})
+    if dl:
+        fmts.append({"quality": "With watermark", "format": "MP4", "type": "video", "size": None, "sel": dl})
+    if music:
+        fmts.append({"quality": "Audio", "format": "MP3", "type": "audio", "size": None, "sel": music})
+    if hw and play:
+        fmts.append({"quality": "Clean · crop out watermark", "format": "MP4", "type": "video",
+                     "size": None, "sel": "crop:" + play})
+    return {"ok": True, "title": det.get("desc"), "duration": det.get("duration") or v.get("duration"),
+            "thumbnail": (((v.get("origin_cover") or {}).get("url_list") or [None])[0]),
+            "has_watermark": hw, "formats": fmts}
 
 
 @app.get("/api/stream")
@@ -330,6 +358,31 @@ def stream(request: Request, url: str = Query(...), name: str = Query("video.mp4
     if up.headers.get("Content-Length"):
         out["content-length"] = up.headers["Content-Length"]
     return StreamingResponse(gen(), headers=out)
+
+
+@app.get("/api/crop")
+def crop(request: Request, url: str = Query(...), name: str = Query("video.mp4"), bottom: float = 0.12):
+    """Download the clean play_addr, crop off the bottom band (removes baked-in TikTok watermark), return the file."""
+    check_auth(request)
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return JSONResponse(status_code=400, content={"ok": False, "error": "bad url"})
+    tmp = tempfile.mkdtemp(prefix="ttcrop_")
+    src = os.path.join(tmp, "in.mp4")
+    dst = os.path.join(tmp, "out.mp4")
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": UA, "referer": "https://www.tiktok.com/"}), timeout=120) as r, open(src, "wb") as f:
+            shutil.copyfileobj(r, f)
+        keep = max(0.5, 1.0 - max(0.0, min(bottom, 0.4)))
+        vf = f"crop=iw:ih*{keep:.4f}:0:0"
+        p = subprocess.run(["ffmpeg", "-y", "-i", src, "-vf", vf, "-c:a", "copy", "-movflags", "+faststart", dst],
+                           capture_output=True, timeout=240)
+        if p.returncode != 0 or not os.path.exists(dst):
+            raise RuntimeError(p.stderr.decode("utf-8", "replace")[-200:])
+    except Exception as e:
+        shutil.rmtree(tmp, ignore_errors=True)
+        return JSONResponse(status_code=502, content={"ok": False, "error": str(e)})
+    return FileResponse(dst, filename=name, media_type="video/mp4",
+                        background=BackgroundTask(shutil.rmtree, tmp, True))
 
 
 @app.get("/api/info")
