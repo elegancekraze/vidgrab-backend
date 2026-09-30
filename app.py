@@ -133,12 +133,12 @@ def _vidssave_decrypt(blob: str):
     return None
 
 
-def vidssave_parse(url: str) -> dict:
+def vidssave_parse(url: str, origin: str = "cache") -> dict:
     body = urllib.parse.urlencode({
         "hostname": "vidssave.com",
         "auth": "4c9b7d21",
         "domain": "api-ak.vidssave.com",
-        "origin": "source",
+        "origin": origin,
         "link": url,
     }).encode()
     req = urllib.request.Request(
@@ -164,10 +164,19 @@ def vidssave_parse(url: str) -> dict:
 @app.get("/api/youtube")
 def youtube(request: Request, url: str = Query(...)):
     check_auth(request)
-    try:
-        o = vidssave_parse(url)
-    except Exception as e:
-        return JSONResponse(status_code=502, content={"ok": False, "error": str(e)})
+    o = None
+    err = None
+    for origin in ("cache", "source"):
+        try:
+            cand = vidssave_parse(url, origin)
+            if any(x.get("download_url") for x in cand.get("resources", [])):
+                o = cand
+                break
+            o = o or cand
+        except Exception as e:
+            err = e
+    if o is None:
+        return JSONResponse(status_code=502, content={"ok": False, "error": str(err)})
     fmts = []
     for x in o.get("resources", []):
         if not x.get("download_url"):
