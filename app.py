@@ -396,7 +396,7 @@ def clean(request: Request, url: str = Query(...), name: str = Query("video.mp4"
     if not (url.startswith("http://") or url.startswith("https://")):
         return JSONResponse(status_code=400, content={"ok": False, "error": "bad url"})
     _clean_tmp_janitor()
-    if not _CLEAN_LOCK.acquire(timeout=90):
+    if not _CLEAN_LOCK.acquire(timeout=150):
         return JSONResponse(status_code=503, content={
             "ok": False,
             "error": "clean queue busy - another render is running, retry in a few seconds"})
