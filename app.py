@@ -7,6 +7,7 @@ import subprocess
 import base64
 import shutil
 import tempfile
+import threading
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -372,6 +373,21 @@ def stream(request: Request, url: str = Query(...), name: str = Query("video.mp4
     return StreamingResponse(gen(), headers=out)
 
 
+# Render free = 0.1 CPU / 512 MB: two concurrent ffmpeg runs OOM-kill each other.
+# Serialize renders; leaked ttclean_* dirs (aborted requests) also fill the disk.
+_CLEAN_LOCK = threading.Lock()
+
+
+def _clean_tmp_janitor() -> None:
+    now = time.time()
+    for d in glob.glob(os.path.join(tempfile.gettempdir(), "ttclean_*")):
+        try:
+            if now - os.path.getmtime(d) > 1800:
+                shutil.rmtree(d, ignore_errors=True)
+        except OSError:
+            pass
+
+
 @app.get("/api/clean")
 def clean(request: Request, url: str = Query(...), name: str = Query("video.mp4"),
           mode: str = Query("crop"), bottom: float = 0.12):
@@ -379,34 +395,59 @@ def clean(request: Request, url: str = Query(...), name: str = Query("video.mp4"
     check_auth(request)
     if not (url.startswith("http://") or url.startswith("https://")):
         return JSONResponse(status_code=400, content={"ok": False, "error": "bad url"})
-    tmp = tempfile.mkdtemp(prefix="ttclean_")
-    src = os.path.join(tmp, "in.mp4")
-    dst = os.path.join(tmp, "out.mp4")
+    _clean_tmp_janitor()
+    if not _CLEAN_LOCK.acquire(timeout=90):
+        return JSONResponse(status_code=503, content={
+            "ok": False,
+            "error": "clean queue busy - another render is running, retry in a few seconds"})
     try:
-        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": UA, "referer": "https://www.tiktok.com/"}), timeout=120) as r, open(src, "wb") as f:
-            shutil.copyfileobj(r, f)
-        band = max(0.0, min(bottom, 0.4))
-        if mode == "blur":
-            probe = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
-                                    "-show_entries", "stream=width,height", "-of", "csv=p=0", src],
-                                   capture_output=True, timeout=60).stdout.decode().strip()
-            w, h = (int(x) for x in probe.split(",")[:2])
-            bh = max(8, int(h * band))
-            y = h - bh - 1
-            vf = f"delogo=x=1:y={y}:w={w - 2}:h={bh}"
-        else:
-            keep = max(0.5, 1.0 - band)
-            vf = f"crop=iw:ih*{keep:.4f}:0:0"
-        p = subprocess.run(["ffmpeg", "-y", "-i", src, "-vf", vf, "-preset", "ultrafast",
-                            "-crf", "23", "-c:a", "copy", "-movflags", "+faststart", dst],
-                           capture_output=True, timeout=240)
-        if p.returncode != 0 or not os.path.exists(dst):
-            raise RuntimeError(p.stderr.decode("utf-8", "replace")[-200:])
-    except Exception as e:
-        shutil.rmtree(tmp, ignore_errors=True)
-        return JSONResponse(status_code=502, content={"ok": False, "error": str(e)})
-    return FileResponse(dst, filename=name, media_type="video/mp4",
-                        background=BackgroundTask(shutil.rmtree, tmp, True))
+        tmp = tempfile.mkdtemp(prefix="ttclean_")
+        src = os.path.join(tmp, "in.mp4")
+        dst = os.path.join(tmp, "out.mp4")
+        try:
+            last = ""
+            for _ in range(3):
+                try:
+                    with urllib.request.urlopen(urllib.request.Request(
+                            url, headers={"User-Agent": UA, "referer": "https://www.tiktok.com/"}),
+                            timeout=120) as r, open(src, "wb") as f:
+                        shutil.copyfileobj(r, f)
+                    with open(src, "rb") as f:
+                        head = f.read(12)
+                    if os.path.getsize(src) > 100_000 and head[4:8] == b"ftyp":
+                        break
+                    last = f"bad media payload ({os.path.getsize(src)}B head={head[:8]!r})"
+                except Exception as e:
+                    last = str(e)
+            else:
+                raise RuntimeError(f"media download failed after 3 tries: {last}")
+
+            band = max(0.0, min(bottom, 0.4))
+            if mode == "blur":
+                probe = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
+                                        "-show_entries", "stream=width,height", "-of", "csv=p=0", src],
+                                       capture_output=True, timeout=60).stdout.decode().strip()
+                if "," not in probe:
+                    raise RuntimeError(f"ffprobe found no video stream (probe={probe[:80]!r})")
+                w, h = (int(x) for x in probe.split(",")[:2])
+                bh = max(8, int(h * band))
+                y = h - bh - 1
+                vf = f"delogo=x=1:y={y}:w={w - 2}:h={bh}"
+            else:
+                keep = max(0.5, 1.0 - band)
+                vf = f"crop=iw:ih*{keep:.4f}:0:0"
+            p = subprocess.run(["ffmpeg", "-y", "-i", src, "-vf", vf, "-preset", "ultrafast",
+                                "-crf", "23", "-c:a", "copy", "-movflags", "+faststart", dst],
+                               capture_output=True, timeout=240)
+            if p.returncode != 0 or not os.path.exists(dst):
+                raise RuntimeError(p.stderr.decode("utf-8", "replace")[-200:])
+        except Exception as e:
+            shutil.rmtree(tmp, ignore_errors=True)
+            return JSONResponse(status_code=502, content={"ok": False, "error": str(e)})
+        return FileResponse(dst, filename=name, media_type="video/mp4",
+                            background=BackgroundTask(shutil.rmtree, tmp, True))
+    finally:
+        _CLEAN_LOCK.release()
 
 
 @app.get("/api/info")
